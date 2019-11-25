@@ -12,6 +12,7 @@ import datetime
 
 from collections import OrderedDict
 
+from urllib3.exceptions import InsecureRequestWarning
 
 def decode_string(byte_string):
   return byte_string.decode('UTF-8').replace('\x00', '')
@@ -225,9 +226,10 @@ def main():
   parser.add_argument('url', help='URL to fetch NTLM challenge from')
   args = parser.parse_args()
   
-  # setup request
+  # setup request, insecurely
   headers = {'Authorization': 'NTLM TlRMTVNTUAABAAAAB4IIAAAAAAAAAAAAAAAAAAAAAAA='}
-  request = requests.get(args.url, headers=headers)
+  requests.packages.urllib3.disable_warnings(category=InsecureRequestWarning)
+  request = requests.get(args.url, headers=headers, verify=False)
   
   if request.status_code not in [401, 302]:
     print('[!] Expecting response code 401 or 302, received: {}'.format(request.status_code))
