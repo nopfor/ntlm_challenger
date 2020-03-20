@@ -3,9 +3,12 @@
 # parsing from "NT LAN Manager (NTLM) Authentication Protocol" v20190923, revision  31.0
 # https://winprotocoldoc.blob.core.windows.net/productionwindowsarchives/MS-NLMP/%5bMS-NLMP%5d.pdf
 
-import argparse
+from impacket import smb3, smb, ntlm
+from impacket.smbconnection import SMBConnection
 
 import requests
+
+import argparse
 import sys
 import base64
 import datetime
@@ -13,6 +16,7 @@ import datetime
 from collections import OrderedDict
 
 from urllib3.exceptions import InsecureRequestWarning
+
 
 def decode_string(byte_string):
   return byte_string.decode('UTF-8').replace('\x00', '')
@@ -218,42 +222,188 @@ def print_challenge(challenge):
     print('  {}'.format(flag))
 
 
-def main():
-
-  # setup arguments
-  parser = argparse.ArgumentParser(description='Fetch and parse NTLM challenge ' +
-    'messages from HTTP (e.g. Autodiscover/ActiveSync/OWA) services')
-  parser.add_argument('url', help='URL to fetch NTLM challenge from')
-  args = parser.parse_args()
+def request_http(url):
   
   # setup request, insecurely
   headers = {'Authorization': 'NTLM TlRMTVNTUAABAAAAB4IIAAAAAAAAAAAAAAAAAAAAAAA='}
   requests.packages.urllib3.disable_warnings(category=InsecureRequestWarning)
-  request = requests.get(args.url, headers=headers, verify=False)
+
+  request = requests.get(url, headers=headers, verify=False)
   
   if request.status_code not in [401, 302]:
     print('[!] Expecting response code 401 or 302, received: {}'.format(request.status_code))
-    sys.exit()
+    return None
   
   # get auth header
   auth_header = request.headers.get('WWW-Authenticate')
   
   if not auth_header:
     print('[!] NTLM Challenge response not found (WWW-Authenticate header missing)')
-    sys.exit()
+    return None
 
   if not 'NTLM' in auth_header:
     print('[!] NTLM Challenge response not found (WWW-Authenticate does not contain "NTLM")')
-    sys.exit()
+    return None
 
   # get challenge message from header
   challenge_message = base64.b64decode(auth_header.split(' ')[1].replace(',', ''))
 
-  # parse challenge
-  challenge = parse_challenge(challenge_message)
+  return challenge_message
 
+
+def request_SMBv23(host, port=445):
+
+  # start client
+  smb_client = smb3.SMB3(host, host, sess_port=port)
+  
+  # start: modified from login()
+  # https://github.com/SecureAuthCorp/impacket/blob/master/impacket/smb3.py
+  
+  session_setup = smb3.SMB2SessionSetup()
+  
+  if smb_client.RequireMessageSigning is True:
+    session_setup['SecurityMode'] = smb3.SMB2_NEGOTIATE_SIGNING_REQUIRED
+  else:
+    session_setup['SecurityMode'] = smb3.SMB2_NEGOTIATE_SIGNING_ENABLED
+  
+  session_setup['Flags'] = 0
+  
+  ## NTLMSSP
+  blob = smb3.SPNEGO_NegTokenInit()
+  blob['MechTypes'] = [smb3.TypesMech['NTLMSSP - Microsoft NTLM Security Support Provider']]
+  
+  auth = ntlm.getNTLMSSPType1(smb_client._Connection['ClientName'], '',
+            smb_client._Connection['RequireSigning'])
+  blob['MechToken'] = auth.getData()
+
+  session_setup['SecurityBufferLength'] = len(blob)
+  session_setup['Buffer']               = blob.getData()
+  
+  packet = smb_client.SMB_PACKET()
+  packet['Command'] = smb3.SMB2_SESSION_SETUP
+  packet['Data']    = session_setup
+  
+  packet_id = smb_client.sendSMB(packet)
+  
+  smb_response = smb_client.recvSMB(packet_id)
+
+  if smb_client._Connection['Dialect'] == smb3.SMB2_DIALECT_311:
+      smb_client.__UpdatePreAuthHash(smb_response.rawData)
+  
+  ## NTLM challenge
+  if smb_response.isValidAnswer(smb3.STATUS_MORE_PROCESSING_REQUIRED):
+    session_setup_response = smb3.SMB2SessionSetup_Response(smb_response['Data'])
+    resp_token = smb3.SPNEGO_NegTokenResp(session_setup_response['Buffer'])
+
+    return resp_token['ResponseToken']
+
+  else:
+    return None
+
+
+def request_SMBv1(host, port=445):
+  
+  # start client
+  smb_client = smb.SMB(host, host, sess_port=port)
+
+  ## start: modified from login_standard()
+  ## https://github.com/SecureAuthCorp/impacket/blob/master/impacket/smb.py
+
+  session_setup = smb.SMBCommand(smb.SMB.SMB_COM_SESSION_SETUP_ANDX)
+  session_setup['Parameters'] = smb.SMBSessionSetupAndX_Extended_Parameters()
+  session_setup['Data']       = smb.SMBSessionSetupAndX_Extended_Data()
+
+  session_setup['Parameters']['MaxBufferSize'] = 61440
+  session_setup['Parameters']['MaxMpxCount']   = 2
+  session_setup['Parameters']['VcNumber']      = 1
+  session_setup['Parameters']['SessionKey']    = 0
+  session_setup['Parameters']['Capabilities']  = smb.SMB.CAP_EXTENDED_SECURITY | \
+                                                 smb.SMB.CAP_USE_NT_ERRORS |  \
+                                                 smb.SMB.CAP_UNICODE | \
+                                                 smb.SMB.CAP_LARGE_READX | \
+                                                 smb.SMB.CAP_LARGE_WRITEX
+
+  ## NTLMSSP
+  blob = smb.SPNEGO_NegTokenInit()
+
+  blob['MechTypes'] = [smb.TypesMech['NTLMSSP - Microsoft NTLM Security Support Provider']]
+
+  auth = ntlm.getNTLMSSPType1(smb_client.get_client_name(), '',
+           smb_client._SignatureRequired, use_ntlmv2 = True)
+  blob['MechToken'] = auth.getData()
+  
+  session_setup['Parameters']['SecurityBlobLength'] = len(blob)
+  session_setup['Parameters'].getData()
+  session_setup['Data']['SecurityBlob']  = blob.getData()
+  session_setup['Data']['NativeOS']      = 'Unix'
+  session_setup['Data']['NativeLanMan']  = 'Samba'
+
+  smb_packet = smb.NewSMBPacket()
+
+  if smb_client._SignatureRequired:
+    smb_packet['Flags2'] |= smb_packet.SMB.FLAGS2_SMB_SECURITY_SIGNATURE
+  
+  smb_packet.addCommand(session_setup)
+
+  smb_client.sendSMB(smb_packet)
+
+  smb_response = smb_client.recvSMB()
+
+  ## NTLM challenge
+  if smb_response.isValidAnswer(smb.SMB.SMB_COM_SESSION_SETUP_ANDX):
+
+    session_response   = smb.SMBCommand(smb_response['Data'][0])
+    session_parameters = smb.SMBSessionSetupAndX_Extended_Response_Parameters(session_response['Parameters'])
+    session_data       = smb.SMBSessionSetupAndX_Extended_Response_Data(flags = smb_response['Flags2'])
+    session_data['SecurityBlobLength'] = session_parameters['SecurityBlobLength']
+    session_data.fromString(session_response['Data'])
+
+    resp_token = smb.SPNEGO_NegTokenResp(session_data['SecurityBlob'])
+
+    return resp_token['ResponseToken']
+
+  else:
+    return None
+
+
+def main():
+
+  # setup arguments
+  parser = argparse.ArgumentParser(description='Fetch and parse NTLM challenge ' +
+      'messages from HTTP and SMB services')
+  parser.add_argument('url', help='HTTP or SMB URL to fetch NTLM challenge from')
+  parser.add_argument('--smbv1', action='store_true', help='Use SMBv1')
+  args = parser.parse_args()
+
+  # request challenge
+  if args.url.startswith('smb'):
+    
+    # get host/port from SMB
+    host_port = args.url.split("://")[1].split("/")[0].split(':')
+    
+    if len(host_port) == 2:
+      host, port = host_port
+    else:
+      host = host_port[0]
+      port = 445
+
+    if args.smbv1:
+      challenge = request_SMBv1(host, port)
+    else:
+      challenge = request_SMBv23(host, port)
+
+  elif args.url.startswith('http'):
+    challenge = request_http(args.url)
+  
+  else:
+    print('[!] Invalid URL, expecting http://... or smb://...')
+    sys.exit()
+
+  # parse challenge
+  parsed_challenge = parse_challenge(challenge)
+  
   # print challenge
-  print_challenge(challenge)
+  print_challenge(parsed_challenge)
 
 
 if __name__ == '__main__':
