@@ -2,14 +2,14 @@
 NTLM Challenger
 ===============
 
-ntlm_challenger will send a NTLM negotiate message to a provided HTTP or SMB endpoint that accepts NTLM authentication, parse the challenge message, and print information received from the server.
+ntlm_challenger will send a NTLM negotiate message to a provided HTTP, SMB or MSSQL endpoint that accepts NTLM authentication, parse the challenge message, and print information received from the server.
 
 Requirements
 ------------
 
 ntlm_challenger supports Python 3.
 
-The `requests` library is used to make HTTP(S) requests. `impacket` is used to set up the SMB connection.
+The `requests` library is used to make HTTP(S) requests. `impacket` is used to set up the SMB or MSSQL connection.
 
 Usage
 -----
@@ -73,3 +73,32 @@ Negotiate Flags:
   NTLMSSP_NEGOTIATE_128
   NTLMSSP_NEGOTIATE_56
 ```
+
+MSSQL Example:
+
+```
+$ python3 ntlm_challenger.py 'mssql://172.16.10.1'
+
+Target (Domain): BLACKARROW
+
+Version: Server 2016 or 2019 / Windows 10 (build 17763)
+
+TargetInfo:
+  MsvAvNbDomainName: BLACKARROW
+  MsvAvNbComputerName: WINSQL01
+  MsvAvDnsDomainName: blackarrow.lab
+  MsvAvDnsComputerName: WINSQL01.blackarrow.lab
+  MsvAvDnsTreeName: blackarrow.lab
+  MsvAvTimestamp: Sep 30, 2022 10:55:18.194742
+
+Negotiate Flags:
+  NTLMSSP_NEGOTIATE_UNICODE
+  NTLMSSP_REQUEST_TARGET
+  NTLMSSP_TARGET_TYPE_DOMAIN
+  NTLMSSP_NEGOTIATE_EXTENDED_SESSIONSECURITY
+  NTLMSSP_NEGOTIATE_TARGET_INFO
+  NTLMSSP_NEGOTIATE_VERSION
+  NTLMSSP_NEGOTIATE_128
+  NTLMSSP_NEGOTIATE_56
+```
+
