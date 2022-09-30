@@ -3,7 +3,7 @@
 # parsing from "NT LAN Manager (NTLM) Authentication Protocol" v20190923, revision  31.0
 # https://winprotocoldoc.blob.core.windows.net/productionwindowsarchives/MS-NLMP/%5bMS-NLMP%5d.pdf
 
-from impacket import smb3, smb, ntlm
+from impacket import smb3, smb, tds, ntlm
 from impacket.smbconnection import SMBConnection
 
 import requests
@@ -12,6 +12,7 @@ import argparse
 import sys
 import base64
 import datetime
+import random
 
 from collections import OrderedDict
 
@@ -366,12 +367,45 @@ def request_SMBv1(host, port=445):
     return None
 
 
+def request_mssql(host, port=1443):
+
+    ms_sql = tds.MSSQL(host, port)
+    ms_sql.connect()
+    
+    login = tds.TDS_LOGIN()
+
+    login['HostName'] = ''
+    login['AppName']  = ''
+    login['ServerName'] = ms_sql.server.encode('utf-16le')
+    login['CltIntName']  = login['AppName']
+    login['ClientPID'] = random.randint(0,1024)
+    login['PacketSize'] = ms_sql.packetSize
+    login['OptionFlags2'] = tds.TDS_INIT_LANG_FATAL | tds.TDS_ODBC_ON | tds.TDS_INTEGRATED_SECURITY_ON
+    
+    # NTLMSSP Negotiate
+    auth = ntlm.getNTLMSSPType1('','')
+    login['SSPI'] = auth.getData()
+    login['Length'] = len(login.getData())
+
+    # Send the NTLMSSP Negotiate or SQL Auth Packet
+    ms_sql.sendTDS(tds.TDS_LOGIN7, login.getData())
+    
+    tdsx = ms_sql.recvTDS()
+    try:
+        return tdsx['Data'][3:]
+    except:
+        print("Error")
+        pass
+    
+    return None
+
+
 def main():
 
   # setup arguments
   parser = argparse.ArgumentParser(description='Fetch and parse NTLM challenge ' +
-      'messages from HTTP and SMB services')
-  parser.add_argument('url', help='HTTP or SMB URL to fetch NTLM challenge from')
+      'messages from HTTP, SMB or MSSQL services')
+  parser.add_argument('url', help='HTTP, SMB or MSSQL URL to fetch NTLM challenge from')
   parser.add_argument('--smbv1', action='store_true', help='Use SMBv1')
   args = parser.parse_args()
 
@@ -395,8 +429,18 @@ def main():
   elif args.url.startswith('http'):
     challenge = request_http(args.url)
   
+  elif args.url.startswith('mssql'):
+    host_port = args.url.split("://")[1].split("/")[0].split(':')
+    
+    if len(host_port) == 2:
+      host, port = host_port
+    else:
+      host = host_port[0]
+      port = 1433
+    
+    challenge = request_mssql(host, port)
   else:
-    print('[!] Invalid URL, expecting http://... or smb://...')
+    print('[!] Invalid URL, expecting http://..., smb://... or mssql://...')
     sys.exit()
 
   # parse challenge
