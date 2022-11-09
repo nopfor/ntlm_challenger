@@ -223,10 +223,12 @@ def print_challenge(challenge):
     print('  {}'.format(flag))
 
 
-def request_http(url):
+def request_http(url, virtualhost=None):
   
   # setup request, insecurely
   headers = {'Authorization': 'NTLM TlRMTVNTUAABAAAAB4IIAAAAAAAAAAAAAAAAAAAAAAA='}
+  if virtualhost:
+    headers['Host'] = virtualhost
   requests.packages.urllib3.disable_warnings(category=InsecureRequestWarning)
 
   request = requests.get(url, headers=headers, verify=False)
@@ -407,6 +409,7 @@ def main():
       'messages from HTTP, SMB or MSSQL services')
   parser.add_argument('url', help='HTTP, SMB or MSSQL URL to fetch NTLM challenge from')
   parser.add_argument('--smbv1', action='store_true', help='Use SMBv1')
+  parser.add_argument('--virtualhost', '-v', help='Optional host header to use')
   args = parser.parse_args()
 
   # request challenge
@@ -427,7 +430,7 @@ def main():
       challenge = request_SMBv23(host, port)
 
   elif args.url.startswith('http'):
-    challenge = request_http(args.url)
+    challenge = request_http(args.url, args.virtualhost)
   
   elif args.url.startswith('mssql'):
     host_port = args.url.split("://")[1].split("/")[0].split(':')
